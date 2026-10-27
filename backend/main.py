@@ -9,7 +9,7 @@ ROOT=Path(os.getenv('EZEAGENT_WORKSPACE','.')).resolve(); DB=Path(os.getenv('EZE
 app=FastAPI(title='EzeAgent API',version='0.1.0')
 app.add_middleware(CORSMiddleware,allow_origins=[x.strip() for x in os.getenv('EZEAGENT_CORS_ORIGINS','http://localhost:5173').split(',') if x.strip()],allow_methods=['GET','POST'],allow_headers=['Content-Type'])
 def db():
- DB.parent.mkdir(parents=True,exist_ok=True); c=sqlite3.connect(DB); c.row_factory=sqlite3.Row
+ DB.parent.mkdir(parents=True,exist_ok=True); c=sqlite3.connect(DB,timeout=10); c.row_factory=sqlite3.Row
  c.execute('CREATE TABLE IF NOT EXISTS activity(id TEXT PRIMARY KEY,kind TEXT,detail TEXT,created REAL)'); c.execute('CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,path TEXT,content TEXT,digest TEXT,expires REAL,status TEXT,created REAL)'); return c
 def audit(kind,detail):
  with db() as c:c.execute('INSERT INTO activity VALUES(?,?,?,?)',(str(uuid.uuid4()),kind,json.dumps(detail)[:4000],time.time()))
@@ -96,19 +96,23 @@ def approvals():
  return {'approvals':[dict(r) for r in rows]}
 @app.post('/api/v1/approvals/{aid}/approve')
 def approve(aid:str):
+ stale_path=None
  with db() as c:
   row=c.execute('SELECT * FROM approvals WHERE id=?',(aid,)).fetchone()
   if not row:raise HTTPException(404,'Approval not found')
   if row['status']!='pending':raise HTTPException(409,'Approval no longer pending')
-  if row['expires']<time.time():c.execute("UPDATE approvals SET status='expired' WHERE id=?",(aid,));raise HTTPException(409,'Approval expired')
+  if row['expires']<time.time():c.execute("UPDATE approvals SET status='expired' WHERE id=?",(aid,));c.commit();raise HTTPException(409,'Approval expired')
   p=safe(row['path'])
   if not p.is_file() or hashlib.sha256(p.read_bytes()).hexdigest()!=row['digest']:
-   c.execute("UPDATE approvals SET status='stale' WHERE id=?",(aid,));audit('patch_stale',{'approval_id':aid});raise HTTPException(409,'File changed; create a fresh proposal')
-  tmp=p.with_name(p.name+'.ezeagent.tmp')
-  try:tmp.write_text(row['content'],encoding='utf-8');os.replace(tmp,p)
-  except OSError:
-   tmp.unlink(missing_ok=True);raise HTTPException(500,'Patch failed; original file preserved')
-  c.execute("UPDATE approvals SET status='applied' WHERE id=?",(aid,))
+   c.execute("UPDATE approvals SET status='stale' WHERE id=?",(aid,));c.commit();stale_path=row['path']
+  else:
+   tmp=p.with_name(p.name+'.ezeagent.tmp')
+   try:tmp.write_text(row['content'],encoding='utf-8');os.replace(tmp,p)
+   except OSError:
+    tmp.unlink(missing_ok=True);raise HTTPException(500,'Patch failed; original file preserved')
+   c.execute("UPDATE approvals SET status='applied' WHERE id=?",(aid,))
+ if stale_path:
+  audit('patch_stale',{'approval_id':aid,'path':stale_path});raise HTTPException(409,'File changed; create a fresh proposal')
  audit('patch_applied',{'approval_id':aid,'path':row['path']});return {'ok':True,'status':'applied','path':row['path']}
 @app.post('/api/v1/approvals/{aid}/reject')
 def reject(aid:str):
