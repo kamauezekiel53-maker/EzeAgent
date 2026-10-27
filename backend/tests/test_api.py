@@ -120,3 +120,74 @@ def test_computer_order_draft_rejects_multiline_command(monkeypatch):
  monkeypatch.setattr(m.httpx,'AsyncClient',Client)
  r=client.post('/api/v1/computer/commands/draft',json={'provider':'omniroute','order':'show files then remove some'},headers={'Origin':'http://localhost:5173'})
  assert r.status_code==422
+
+
+def test_memory_is_shared_only_when_chat_opt_in_is_checked(tmp_path,monkeypatch):
+ monkeypatch.setattr(m,'DB',tmp_path/'memory-opt-in.db')
+ headers={'Origin':'http://localhost:5173'}
+ saved=client.post('/api/v1/memory',json={'content':'I prefer concise answers'},headers=headers)
+ assert saved.status_code==200
+ captured=[]
+ class Response:
+  status_code=200
+  def json(self):return {'choices':[{'message':{'content':'hello'}}]}
+ class Client:
+  def __init__(self,**kwargs):pass
+  async def __aenter__(self):return self
+  async def __aexit__(self,*args):return False
+  async def post(self,url,**kwargs):captured.append(kwargs['json']['messages']);return Response()
+ monkeypatch.setattr(m.httpx,'AsyncClient',Client)
+ monkeypatch.setitem(m.P['openai'],'key','test-key')
+ base={'provider':'openai','messages':[{'role':'user','content':'Hi'}]}
+ assert client.post('/api/v1/chat',json=base).status_code==200
+ assert 'I prefer concise answers' not in str(captured[-1])
+ assert client.post('/api/v1/chat',json={**base,'include_memories':True}).status_code==200
+ assert 'I prefer concise answers' in str(captured[-1])
+ memory_id=saved.json()['id']
+ assert client.delete(f'/api/v1/memory/{memory_id}',headers=headers).status_code==200
+ assert client.get('/api/v1/memory',headers=headers).json()['memories']==[]
+
+def test_memory_and_reminder_routes_require_local_dashboard_origin():
+ assert client.get('/api/v1/memory',headers={'Origin':'https://untrusted.example'}).status_code==403
+ assert client.get('/api/v1/reminders',headers={'Origin':'https://untrusted.example'}).status_code==403
+
+def test_reminders_can_be_created_completed_and_removed(tmp_path,monkeypatch):
+ monkeypatch.setattr(m,'DB',tmp_path/'reminders.db')
+ headers={'Origin':'http://localhost:5173'}
+ reminder=client.post('/api/v1/reminders',json={'title':'Take a break','due_at':m.time.time()+3600},headers=headers)
+ assert reminder.status_code==200 and reminder.json()['status']=='pending'
+ reminder_id=reminder.json()['id']
+ assert client.post(f'/api/v1/reminders/{reminder_id}/complete',headers=headers).status_code==200
+ assert client.get('/api/v1/reminders',headers=headers).json()['reminders'][0]['status']=='complete'
+ assert client.delete(f'/api/v1/reminders/{reminder_id}',headers=headers).status_code==200
+ assert client.get('/api/v1/reminders',headers=headers).json()['reminders']==[]
+
+def test_reminder_in_the_past_is_rejected():
+ r=client.post('/api/v1/reminders',json={'title':'Too late','due_at':m.time.time()-10},headers={'Origin':'http://localhost:5173'})
+ assert r.status_code==400
+
+
+def test_skills_registry_reports_available_and_unconnected_skills():
+ skills={skill['id']:skill for skill in client.get('/api/v1/skills').json()['skills']}
+ assert skills['voice']['available'] is True
+ assert skills['reminders']['available'] is True
+ assert skills['calendar_email_weather_research_home']['available'] is False
+ assert skills['calendar_email_weather_research_home']['connection_required'] is True
+
+def test_chat_accepts_custom_mode_and_rejects_unknown_mode(tmp_path,monkeypatch):
+ monkeypatch.setattr(m,'DB',tmp_path/'mode.db')
+ monkeypatch.setitem(m.P['openai'],'key','test-key')
+ captured=[]
+ class Response:
+  status_code=200
+  def json(self):return {'choices':[{'message':{'content':'hello'}}]}
+ class Client:
+  def __init__(self,**kwargs):pass
+  async def __aenter__(self):return self
+  async def __aexit__(self,*args):return False
+  async def post(self,url,**kwargs):captured.append(kwargs['json']['messages']);return Response()
+ monkeypatch.setattr(m.httpx,'AsyncClient',Client)
+ base={'provider':'openai','messages':[{'role':'user','content':'Help me focus'}]}
+ assert client.post('/api/v1/chat',json={**base,'mode':'focus'}).status_code==200
+ assert 'avoid tangents' in captured[-1][0]['content']
+ assert client.post('/api/v1/chat',json={**base,'mode':'unknown'}).status_code==400

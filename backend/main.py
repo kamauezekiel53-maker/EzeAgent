@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from backend.skills import list_skills
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 ROOT=Path(os.getenv('EZEAGENT_WORKSPACE','.')).resolve(); DB=Path(os.getenv('EZEAGENT_DATABASE_PATH','./ezeagent.db')).resolve(); TTL=max(60,int(os.getenv('EZEAGENT_APPROVAL_TTL_SECONDS','900')))
@@ -14,7 +15,7 @@ app=FastAPI(title='EzeAgent API',version='0.1.0')
 app.add_middleware(CORSMiddleware,allow_origins=[x.strip() for x in os.getenv('EZEAGENT_CORS_ORIGINS','http://localhost:5173').split(',') if x.strip()],allow_methods=['GET','POST'],allow_headers=['Content-Type'])
 def db():
  DB.parent.mkdir(parents=True,exist_ok=True); c=sqlite3.connect(DB,timeout=10); c.row_factory=sqlite3.Row
- c.execute('CREATE TABLE IF NOT EXISTS activity(id TEXT PRIMARY KEY,kind TEXT,detail TEXT,created REAL)'); c.execute('CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,path TEXT,content TEXT,digest TEXT,expires REAL,status TEXT,created REAL)'); return c
+ c.execute('CREATE TABLE IF NOT EXISTS activity(id TEXT PRIMARY KEY,kind TEXT,detail TEXT,created REAL)'); c.execute('CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,path TEXT,content TEXT,digest TEXT,expires REAL,status TEXT,created REAL)'); c.execute('CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY,content TEXT,created REAL)'); c.execute('CREATE TABLE IF NOT EXISTS reminders(id TEXT PRIMARY KEY,title TEXT,due_at REAL,status TEXT,created REAL)'); return c
 def audit(kind,detail):
  with db() as c:c.execute('INSERT INTO activity VALUES(?,?,?,?)',(str(uuid.uuid4()),kind,json.dumps(detail)[:4000],time.time()))
 def safe(raw):
@@ -30,11 +31,13 @@ def require_local_ui(request:Request):
  origins={x.strip() for x in os.getenv('EZEAGENT_CORS_ORIGINS','http://localhost:5173').split(',') if x.strip()}
  if not local or request.headers.get('origin') not in origins:raise HTTPException(403,'Computer controls are available only from the local EzeAgent dashboard')
 class TestReq(BaseModel): provider:str; base_url:str|None=None; api_key:str|None=None
-class ChatReq(BaseModel): provider:str='openrouter'; model:str|None=None; api_key:str|None=None; messages:list[dict[str,str]]=Field(min_length=1,max_length=80)
+class ChatReq(BaseModel): provider:str='openrouter'; model:str|None=None; api_key:str|None=None; mode:str='work'; include_memories:bool=False; messages:list[dict[str,str]]=Field(min_length=1,max_length=80)
 class ReadReq(BaseModel): path:str
 class Proposal(BaseModel): path:str; content:str=Field(max_length=500000)
 class CommandReq(BaseModel): command:str=Field(min_length=1,max_length=2000)
 class ComputerOrderReq(BaseModel): provider:str; api_key:str|None=None; model:str|None=None; order:str=Field(min_length=2,max_length=1000)
+class MemoryReq(BaseModel): content:str=Field(min_length=1,max_length=1000)
+class ReminderReq(BaseModel): title:str=Field(min_length=2,max_length=120); due_at:float=Field(gt=0)
 P={'openrouter':{'name':'OpenRouter','base':'https://openrouter.ai/api/v1','key':os.getenv('OPENROUTER_API_KEY',''),'model':os.getenv('OPENROUTER_MODEL','meta-llama/llama-3.3-8b-instruct:free'),'kind':'cloud'},'openai':{'name':'OpenAI','base':'https://api.openai.com/v1','key':os.getenv('OPENAI_API_KEY',''),'model':os.getenv('OPENAI_MODEL','gpt-4o-mini'),'kind':'cloud'},'omniroute':{'name':'OmniRoute','base':os.getenv('OMNIROUTE_BASE_URL','http://127.0.0.1:20128/v1').rstrip('/'),'key':os.getenv('OMNIROUTE_API_KEY',''),'model':os.getenv('OMNIROUTE_MODEL','auto'),'kind':'local'}}
 COMMANDS:dict[str,dict[str,Any]]={}
 COMMANDS_LOCK=Lock()
@@ -59,6 +62,8 @@ def find_office_executable(app_name:str)->str|None:
 if os.getenv('COMPATIBLE_API_BASE_URL'):P['compatible']={'name':'OpenAI-compatible endpoint','base':os.getenv('COMPATIBLE_API_BASE_URL','').rstrip('/'),'key':os.getenv('COMPATIBLE_API_KEY',''),'model':os.getenv('COMPATIBLE_MODEL','local-model'),'kind':'local' if 'localhost' in os.getenv('COMPATIBLE_API_BASE_URL','') or '127.0.0.1' in os.getenv('COMPATIBLE_API_BASE_URL','') else 'compatible'}
 @app.get('/api/v1/health')
 def health():return {'status':'ok','version':'0.1.0'}
+@app.get('/api/v1/skills')
+def skills():return {'skills':list_skills()}
 @app.get('/api/v1/providers')
 def providers():return [{'id':k,'name':v['name'],'configured':bool(v['key']) or v['kind']!='cloud','kind':v['kind'],'base_url':v['base'],'default_model':v['model'],'capabilities':['chat'],'streaming':False,'tool_calling':False} for k,v in P.items()]
 @app.post('/api/v1/providers/test')
@@ -89,8 +94,15 @@ async def chat(req:ChatReq):
  key=req.api_key if req.api_key is not None else cfg['key']
  if cfg['kind']=='cloud' and not key:raise HTTPException(400,f"{cfg['name']} API key required; enter it in Providers")
  model=req.model or cfg['model']
+ mode_instructions={'work':'Be clear, practical, and professional.','home':'Use a relaxed, friendly tone and prioritize everyday help.','focus':'Be concise, avoid tangents, and help the user stay on one task.','travel':'Focus on travel planning, practical logistics, and clear options.'}
+ if req.mode not in mode_instructions:raise HTTPException(400,'Unknown assistant mode')
+ system='Assistant mode: '+mode_instructions[req.mode]
+ if req.include_memories:
+  with db() as c:memories=[row['content'] for row in c.execute('SELECT content FROM memories ORDER BY created DESC LIMIT 30').fetchall()]
+  if memories:system+='\nUser-approved saved memories (shared because you enabled this option):\n- '+'\n- '.join(memories)
+ messages=req.messages if req.mode=='work' and not req.include_memories else [{'role':'system','content':system},*req.messages]
  try:
-  async with httpx.AsyncClient(timeout=60) as c:r=await c.post(cfg['base']+'/chat/completions',json={'model':model,'messages':req.messages},headers={'Authorization':f"Bearer {key}"} if key else {})
+  async with httpx.AsyncClient(timeout=60) as c:r=await c.post(cfg['base']+'/chat/completions',json={'model':model,'messages':messages},headers={'Authorization':f"Bearer {key}"} if key else {})
   if r.status_code in (401,403):raise HTTPException(502,'Provider authentication failed')
   if r.status_code==429:raise HTTPException(429,'Provider rate limit reached')
   if r.status_code==402:raise HTTPException(402,'Provider account has no available credits or billing is required')
@@ -99,6 +111,54 @@ async def chat(req:ChatReq):
  except httpx.TimeoutException:raise HTTPException(504,'AI provider timeout')
  except httpx.RequestError:raise HTTPException(502,'Cannot connect to provider')
  except (KeyError,IndexError,TypeError,ValueError):raise HTTPException(502,'Malformed provider response')
+@app.get('/api/v1/memory')
+def list_memory(request:Request):
+ require_local_ui(request)
+ with db() as c:rows=c.execute('SELECT id,content,created FROM memories ORDER BY created DESC LIMIT 200').fetchall()
+ return {'memories':[dict(row) for row in rows]}
+@app.post('/api/v1/memory')
+def add_memory(req:MemoryReq,request:Request):
+ require_local_ui(request)
+ content=req.content.strip()
+ if not content:raise HTTPException(400,'Memory cannot be empty')
+ memory_id=str(uuid.uuid4());created=time.time()
+ with db() as c:c.execute('INSERT INTO memories VALUES(?,?,?)',(memory_id,content,created))
+ audit('memory_added',{'memory_id':memory_id})
+ return {'id':memory_id,'content':content,'created':created}
+@app.delete('/api/v1/memory/{memory_id}')
+def forget_memory(memory_id:str,request:Request):
+ require_local_ui(request)
+ with db() as c:result=c.execute('DELETE FROM memories WHERE id=?',(memory_id,))
+ if not result.rowcount:raise HTTPException(404,'Memory not found')
+ audit('memory_forgotten',{'memory_id':memory_id})
+ return {'ok':True}
+@app.get('/api/v1/reminders')
+def list_reminders(request:Request):
+ require_local_ui(request)
+ with db() as c:rows=c.execute('SELECT id,title,due_at,status,created FROM reminders ORDER BY due_at LIMIT 200').fetchall()
+ return {'reminders':[dict(row) for row in rows]}
+@app.post('/api/v1/reminders')
+def add_reminder(req:ReminderReq,request:Request):
+ require_local_ui(request)
+ if req.due_at<=time.time():raise HTTPException(400,'Reminder time must be in the future')
+ reminder_id=str(uuid.uuid4());created=time.time()
+ with db() as c:c.execute('INSERT INTO reminders VALUES(?,?,?,?,?)',(reminder_id,req.title.strip(),req.due_at,'pending',created))
+ audit('reminder_created',{'reminder_id':reminder_id,'due_at':req.due_at})
+ return {'id':reminder_id,'title':req.title.strip(),'due_at':req.due_at,'status':'pending','created':created}
+@app.post('/api/v1/reminders/{reminder_id}/complete')
+def complete_reminder(reminder_id:str,request:Request):
+ require_local_ui(request)
+ with db() as c:result=c.execute("UPDATE reminders SET status='complete' WHERE id=? AND status='pending'",(reminder_id,))
+ if not result.rowcount:raise HTTPException(404,'Pending reminder not found')
+ audit('reminder_completed',{'reminder_id':reminder_id})
+ return {'ok':True}
+@app.delete('/api/v1/reminders/{reminder_id}')
+def delete_reminder(reminder_id:str,request:Request):
+ require_local_ui(request)
+ with db() as c:result=c.execute('DELETE FROM reminders WHERE id=?',(reminder_id,))
+ if not result.rowcount:raise HTTPException(404,'Reminder not found')
+ audit('reminder_deleted',{'reminder_id':reminder_id})
+ return {'ok':True}
 @app.post('/api/v1/computer/terminal')
 def open_terminal(request:Request):
  require_local_ui(request)
