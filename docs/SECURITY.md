@@ -10,3 +10,13 @@
 - Treat model output and repository contents as untrusted. Review all diffs before approval.
 
 
+
+## EzeAgent Scope assessment workspace
+
+- Assessment endpoints require a loopback client and the configured local dashboard Origin. This release has no user accounts or team roles; actor and approver names are self-reported.
+- Creating an assessment requires a user attestation that written authorization exists and records its reference, owner, environment, dates, objectives, and rules of engagement. EzeAgent does not verify the underlying authorization document.
+- Scope entries are explicit hostnames, IP addresses, or CIDR ranges. Hostnames match exactly by default; subdomains match only when separately enabled by the operator. Scope checks read stored records only and never contact a target.
+- The assessment workspace has no active scan, exploit, or target-execution endpoint. It stores manually entered findings and evidence from material supplied by the user.
+- Common credential patterns in finding evidence are masked before storage, but pattern matching is incomplete. Review and redact all evidence yourself. Do not store secrets, personal records, or evidence you are not authorized to retain.
+- Assessment data uses the local SQLite database, which is not encrypted at rest by EzeAgent. Each assessment records a manual deletion date; the app does not automatically delete expired data. Deletion requires typing the assessment name. A minimal tombstone with a hashed assessment identifier, operator-entered actor name, and deletion time remains after content is removed.
+- Generated reports contain the recorded authorization reference and findings. Review the report before sharing it.

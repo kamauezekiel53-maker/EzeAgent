@@ -8,11 +8,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from backend.skills import list_skills
+from backend.security_assessments import router as security_assessment_router
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 ROOT=Path(os.getenv('EZEAGENT_WORKSPACE','.')).resolve(); DB=Path(os.getenv('EZEAGENT_DATABASE_PATH','./ezeagent.db')).resolve(); TTL=max(60,int(os.getenv('EZEAGENT_APPROVAL_TTL_SECONDS','900')))
 app=FastAPI(title='EzeAgent API',version='0.1.0')
 app.add_middleware(CORSMiddleware,allow_origins=[x.strip() for x in os.getenv('EZEAGENT_CORS_ORIGINS','http://localhost:5173').split(',') if x.strip()],allow_methods=['GET','POST'],allow_headers=['Content-Type'])
+app.include_router(security_assessment_router, prefix='/api/v1')
 def db():
  DB.parent.mkdir(parents=True,exist_ok=True); c=sqlite3.connect(DB,timeout=10); c.row_factory=sqlite3.Row
  c.execute('CREATE TABLE IF NOT EXISTS activity(id TEXT PRIMARY KEY,kind TEXT,detail TEXT,created REAL)'); c.execute('CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,path TEXT,content TEXT,digest TEXT,expires REAL,status TEXT,created REAL)'); c.execute('CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY,content TEXT,created REAL)'); c.execute('CREATE TABLE IF NOT EXISTS reminders(id TEXT PRIMARY KEY,title TEXT,due_at REAL,status TEXT,created REAL)'); return c
