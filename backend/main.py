@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Any
-import hashlib, ipaddress, json, os, sqlite3, subprocess, time, uuid
+import hashlib, ipaddress, json, os, shutil, sqlite3, subprocess, time, uuid
 from threading import Lock
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -34,10 +34,26 @@ class ChatReq(BaseModel): provider:str='openrouter'; model:str|None=None; api_ke
 class ReadReq(BaseModel): path:str
 class Proposal(BaseModel): path:str; content:str=Field(max_length=500000)
 class CommandReq(BaseModel): command:str=Field(min_length=1,max_length=2000)
-P={'openrouter':{'name':'OpenRouter','base':'https://openrouter.ai/api/v1','key':os.getenv('OPENROUTER_API_KEY',''),'model':os.getenv('OPENROUTER_MODEL','meta-llama/llama-3.3-8b-instruct:free'),'kind':'cloud'},'openai':{'name':'OpenAI','base':'https://api.openai.com/v1','key':os.getenv('OPENAI_API_KEY',''),'model':os.getenv('OPENAI_MODEL','gpt-4o-mini'),'kind':'cloud'}}
+P={'openrouter':{'name':'OpenRouter','base':'https://openrouter.ai/api/v1','key':os.getenv('OPENROUTER_API_KEY',''),'model':os.getenv('OPENROUTER_MODEL','meta-llama/llama-3.3-8b-instruct:free'),'kind':'cloud'},'openai':{'name':'OpenAI','base':'https://api.openai.com/v1','key':os.getenv('OPENAI_API_KEY',''),'model':os.getenv('OPENAI_MODEL','gpt-4o-mini'),'kind':'cloud'},'omniroute':{'name':'OmniRoute','base':os.getenv('OMNIROUTE_BASE_URL','http://127.0.0.1:20128/v1').rstrip('/'),'key':os.getenv('OMNIROUTE_API_KEY',''),'model':os.getenv('OMNIROUTE_MODEL','auto'),'kind':'local'}}
 COMMANDS:dict[str,dict[str,Any]]={}
 COMMANDS_LOCK=Lock()
 APP_LAUNCH_IDS={'word':'Microsoft.Office.WINWORD.EXE.15','excel':'Microsoft.Office.EXCEL.EXE.15'}
+def find_office_executable(app_name:str)->str|None:
+ executable='WINWORD.EXE' if app_name=='word' else 'EXCEL.EXE'
+ found=shutil.which(executable)
+ if found:return found
+ if os.name=='nt':
+  try:
+   import winreg
+   for hive in (winreg.HKEY_CURRENT_USER,winreg.HKEY_LOCAL_MACHINE):
+    for view in (winreg.KEY_WOW64_64KEY,winreg.KEY_WOW64_32KEY):
+     try:
+      with winreg.OpenKey(hive,rf'SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{executable}',0,winreg.KEY_READ|view) as key:
+       value,_=winreg.QueryValueEx(key,None)
+       if Path(value).is_file():return value
+     except OSError:pass
+  except ImportError:pass
+ return None
 if os.getenv('COMPATIBLE_API_BASE_URL'):P['compatible']={'name':'OpenAI-compatible endpoint','base':os.getenv('COMPATIBLE_API_BASE_URL','').rstrip('/'),'key':os.getenv('COMPATIBLE_API_KEY',''),'model':os.getenv('COMPATIBLE_MODEL','local-model'),'kind':'local' if 'localhost' in os.getenv('COMPATIBLE_API_BASE_URL','') or '127.0.0.1' in os.getenv('COMPATIBLE_API_BASE_URL','') else 'compatible'}
 @app.get('/api/v1/health')
 def health():return {'status':'ok','version':'0.1.0'}
@@ -93,10 +109,13 @@ def open_terminal(request:Request):
 def open_app(app_name:str,request:Request):
  require_local_ui(request)
  if os.name!='nt':raise HTTPException(501,'Application launch is available only on Windows')
- app_id=APP_LAUNCH_IDS.get(app_name.lower())
- if not app_id:raise HTTPException(404,'Application shortcut is not configured')
- try:p=subprocess.Popen(['explorer.exe',f'shell:AppsFolder\\{app_id}'],cwd=str(ROOT),close_fds=True)
- except OSError:raise HTTPException(500,'Could not open the selected application')
+ app_name=app_name.lower()
+ if app_name not in APP_LAUNCH_IDS:raise HTTPException(404,'Application shortcut is not configured')
+ executable=find_office_executable(app_name)
+ try:
+  if executable:p=subprocess.Popen([executable],cwd=str(ROOT),close_fds=True)
+  else:p=subprocess.Popen(['explorer.exe',f'shell:AppsFolder\\{APP_LAUNCH_IDS[app_name]}'],cwd=str(ROOT),close_fds=True)
+ except OSError:raise HTTPException(500,f'Could not open {app_name.title()}. Make sure Microsoft Office is installed.')
  audit('computer_app_opened',{'app':app_name.lower(),'pid':p.pid})
  return {'ok':True,'message':f'{app_name.title()} launch requested','pid':p.pid}
 @app.post('/api/v1/computer/commands/proposals')

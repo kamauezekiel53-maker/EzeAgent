@@ -33,8 +33,20 @@ def test_open_terminal_rejects_untrusted_origin():
  r=client.post('/api/v1/computer/terminal',headers={'Origin':'https://untrusted.example'})
  assert r.status_code==403
 
-def test_open_word_uses_windows_start_menu_app_id(tmp_path,monkeypatch):
+def test_open_word_uses_registered_executable(tmp_path,monkeypatch):
  monkeypatch.setattr(m,'DB',tmp_path/'word.db')
+ monkeypatch.setattr(m,'find_office_executable',lambda name:r'C:\Office\WINWORD.EXE')
+ calls=[]
+ class Process: pid=1234
+ monkeypatch.setattr(m.subprocess,'Popen',lambda *args,**kwargs:(calls.append((args,kwargs)) or Process()))
+ r=client.post('/api/v1/computer/apps/word',headers={'Origin':'http://localhost:5173'})
+ if os.name=='nt':
+  assert r.status_code==200 and calls[0][0][0]==[r'C:\Office\WINWORD.EXE']
+ else:assert r.status_code==501 and not calls
+
+def test_open_word_falls_back_to_apps_folder(tmp_path,monkeypatch):
+ monkeypatch.setattr(m,'DB',tmp_path/'word-fallback.db')
+ monkeypatch.setattr(m,'find_office_executable',lambda name:None)
  calls=[]
  class Process: pid=1234
  monkeypatch.setattr(m.subprocess,'Popen',lambda *args,**kwargs:(calls.append((args,kwargs)) or Process()))
@@ -42,6 +54,12 @@ def test_open_word_uses_windows_start_menu_app_id(tmp_path,monkeypatch):
  if os.name=='nt':
   assert r.status_code==200 and calls[0][0][0]==['explorer.exe',r'shell:AppsFolder\Microsoft.Office.WINWORD.EXE.15']
  else:assert r.status_code==501 and not calls
+
+def test_omniroute_is_available_as_a_local_provider():
+ providers={item['id']:item for item in client.get('/api/v1/providers').json()}
+ assert providers['omniroute']['base_url']=='http://127.0.0.1:20128/v1'
+ assert providers['omniroute']['default_model']=='auto'
+ assert providers['omniroute']['kind']=='local'
 
 def test_open_terminal_is_local_dashboard_only(tmp_path,monkeypatch):
  monkeypatch.setattr(m,'DB',tmp_path/'terminal.db')
