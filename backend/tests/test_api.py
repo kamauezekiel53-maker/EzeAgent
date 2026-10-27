@@ -33,6 +33,16 @@ def test_open_terminal_rejects_untrusted_origin():
  r=client.post('/api/v1/computer/terminal',headers={'Origin':'https://untrusted.example'})
  assert r.status_code==403
 
+def test_open_word_uses_windows_start_menu_app_id(tmp_path,monkeypatch):
+ monkeypatch.setattr(m,'DB',tmp_path/'word.db')
+ calls=[]
+ class Process: pid=1234
+ monkeypatch.setattr(m.subprocess,'Popen',lambda *args,**kwargs:(calls.append((args,kwargs)) or Process()))
+ r=client.post('/api/v1/computer/apps/word',headers={'Origin':'http://localhost:5173'})
+ if os.name=='nt':
+  assert r.status_code==200 and calls[0][0][0]==['explorer.exe',r'shell:AppsFolder\Microsoft.Office.WINWORD.EXE.15']
+ else:assert r.status_code==501 and not calls
+
 def test_open_terminal_is_local_dashboard_only(tmp_path,monkeypatch):
  monkeypatch.setattr(m,'DB',tmp_path/'terminal.db')
  class Process: pid=1234
@@ -56,4 +66,5 @@ def test_command_runs_only_after_review_and_only_once(tmp_path,monkeypatch):
  assert done.status_code==200 and done.json()['stdout']=='done' and len(calls)==1
  assert calls[0][0]==['cmd.exe','/d','/s','/c','echo approved']
  assert client.post(f'/api/v1/computer/commands/{command_id}/run',headers=headers).status_code==404
+
 

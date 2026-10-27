@@ -37,6 +37,7 @@ class CommandReq(BaseModel): command:str=Field(min_length=1,max_length=2000)
 P={'openrouter':{'name':'OpenRouter','base':'https://openrouter.ai/api/v1','key':os.getenv('OPENROUTER_API_KEY',''),'model':os.getenv('OPENROUTER_MODEL','meta-llama/llama-3.3-8b-instruct:free'),'kind':'cloud'},'openai':{'name':'OpenAI','base':'https://api.openai.com/v1','key':os.getenv('OPENAI_API_KEY',''),'model':os.getenv('OPENAI_MODEL','gpt-4o-mini'),'kind':'cloud'}}
 COMMANDS:dict[str,dict[str,Any]]={}
 COMMANDS_LOCK=Lock()
+APP_LAUNCH_IDS={'word':'Microsoft.Office.WINWORD.EXE.15','excel':'Microsoft.Office.EXCEL.EXE.15'}
 if os.getenv('COMPATIBLE_API_BASE_URL'):P['compatible']={'name':'OpenAI-compatible endpoint','base':os.getenv('COMPATIBLE_API_BASE_URL','').rstrip('/'),'key':os.getenv('COMPATIBLE_API_KEY',''),'model':os.getenv('COMPATIBLE_MODEL','local-model'),'kind':'local' if 'localhost' in os.getenv('COMPATIBLE_API_BASE_URL','') or '127.0.0.1' in os.getenv('COMPATIBLE_API_BASE_URL','') else 'compatible'}
 @app.get('/api/v1/health')
 def health():return {'status':'ok','version':'0.1.0'}
@@ -88,6 +89,16 @@ def open_terminal(request:Request):
  except OSError:raise HTTPException(500,'Could not open Command Prompt')
  audit('computer_terminal_opened',{'pid':p.pid})
  return {'ok':True,'message':'Command Prompt opened','pid':p.pid}
+@app.post('/api/v1/computer/apps/{app_name}')
+def open_app(app_name:str,request:Request):
+ require_local_ui(request)
+ if os.name!='nt':raise HTTPException(501,'Application launch is available only on Windows')
+ app_id=APP_LAUNCH_IDS.get(app_name.lower())
+ if not app_id:raise HTTPException(404,'Application shortcut is not configured')
+ try:p=subprocess.Popen(['explorer.exe',f'shell:AppsFolder\\{app_id}'],cwd=str(ROOT),close_fds=True)
+ except OSError:raise HTTPException(500,'Could not open the selected application')
+ audit('computer_app_opened',{'app':app_name.lower(),'pid':p.pid})
+ return {'ok':True,'message':f'{app_name.title()} launch requested','pid':p.pid}
 @app.post('/api/v1/computer/commands/proposals')
 def propose_command(req:CommandReq,request:Request):
  require_local_ui(request)
@@ -182,4 +193,5 @@ def reject(aid:str):
 def activity():
  with db() as c:rows=c.execute('SELECT id,kind,detail,created FROM activity ORDER BY created DESC LIMIT 100').fetchall()
  return {'events':[dict(x) for x in rows]}
+
 
