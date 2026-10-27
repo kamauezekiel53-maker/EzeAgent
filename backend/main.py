@@ -5,6 +5,9 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 ROOT=Path(os.getenv('EZEAGENT_WORKSPACE','.')).resolve(); DB=Path(os.getenv('EZEAGENT_DATABASE_PATH','./ezeagent.db')).resolve(); TTL=max(60,int(os.getenv('EZEAGENT_APPROVAL_TTL_SECONDS','900')))
 app=FastAPI(title='EzeAgent API',version='0.1.0')
 app.add_middleware(CORSMiddleware,allow_origins=[x.strip() for x in os.getenv('EZEAGENT_CORS_ORIGINS','http://localhost:5173').split(',') if x.strip()],allow_methods=['GET','POST'],allow_headers=['Content-Type'])
@@ -20,7 +23,7 @@ def safe(raw):
  if p==ROOT:raise HTTPException(400,'File path required')
  return p
 class TestReq(BaseModel): provider:str; base_url:str|None=None; api_key:str|None=None
-class ChatReq(BaseModel): provider:str='openrouter'; model:str|None=None; messages:list[dict[str,str]]=Field(min_length=1,max_length=80)
+class ChatReq(BaseModel): provider:str='openrouter'; model:str|None=None; api_key:str|None=None; messages:list[dict[str,str]]=Field(min_length=1,max_length=80)
 class ReadReq(BaseModel): path:str
 class Proposal(BaseModel): path:str; content:str=Field(max_length=500000)
 P={'openrouter':{'name':'OpenRouter','base':'https://openrouter.ai/api/v1','key':os.getenv('OPENROUTER_API_KEY',''),'model':os.getenv('OPENROUTER_MODEL','meta-llama/llama-3.3-8b-instruct:free'),'kind':'cloud'},'openai':{'name':'OpenAI','base':'https://api.openai.com/v1','key':os.getenv('OPENAI_API_KEY',''),'model':os.getenv('OPENAI_MODEL','gpt-4o-mini'),'kind':'cloud'}}
@@ -35,6 +38,8 @@ async def test(req:TestReq):
  if not base:raise HTTPException(400,'Unknown provider; provide compatible base_url')
  try:
   async with httpx.AsyncClient(timeout=8) as c:r=await c.get(base+'/models',headers={'Authorization':f'Bearer {key}'} if key else {})
+  if r.status_code==402:raise HTTPException(402,'Provider account has no available credits or billing is required')
+  if r.status_code in (401,403):raise HTTPException(502,'Provider authentication failed; check the API key')
   if r.status_code>=400:raise HTTPException(502,f'Provider returned HTTP {r.status_code}')
   data=r.json();return {'ok':True,'provider':req.provider,'models':len(data.get('data',[])) if isinstance(data,dict) and isinstance(data.get('data'),list) else None}
  except httpx.TimeoutException:raise HTTPException(504,'Provider timeout')
@@ -52,12 +57,14 @@ async def models(provider:str='openrouter'):
 async def chat(req:ChatReq):
  cfg=P.get(req.provider)
  if not cfg:raise HTTPException(404,'Provider not configured')
- if cfg['kind']=='cloud' and not cfg['key']:raise HTTPException(400,f"{cfg['name']} API key missing on backend")
+ key=req.api_key if req.api_key is not None else cfg['key']
+ if cfg['kind']=='cloud' and not key:raise HTTPException(400,f"{cfg['name']} API key required; enter it in Providers")
  model=req.model or cfg['model']
  try:
-  async with httpx.AsyncClient(timeout=60) as c:r=await c.post(cfg['base']+'/chat/completions',json={'model':model,'messages':req.messages},headers={'Authorization':f"Bearer {cfg['key']}"} if cfg['key'] else {})
+  async with httpx.AsyncClient(timeout=60) as c:r=await c.post(cfg['base']+'/chat/completions',json={'model':model,'messages':req.messages},headers={'Authorization':f"Bearer {key}"} if key else {})
   if r.status_code in (401,403):raise HTTPException(502,'Provider authentication failed')
   if r.status_code==429:raise HTTPException(429,'Provider rate limit reached')
+  if r.status_code==402:raise HTTPException(402,'Provider account has no available credits or billing is required')
   if r.status_code>=400:raise HTTPException(502,f'Provider returned HTTP {r.status_code}')
   d=r.json();answer=d['choices'][0]['message']['content'];usage=d.get('usage');audit('chat',{'provider':req.provider,'model':model,'usage':usage if isinstance(usage,dict) else None});return {'provider':req.provider,'model':model,'content':answer,'usage':usage if isinstance(usage,dict) else None}
  except httpx.TimeoutException:raise HTTPException(504,'AI provider timeout')
@@ -86,7 +93,7 @@ def propose(req:Proposal):
  try:old=p.read_text(encoding='utf-8')
  except (UnicodeDecodeError,OSError):raise HTTPException(400,'Target must be UTF-8 text')
  import difflib
- aid=str(uuid.uuid4());digest=hashlib.sha256(old.encode()).hexdigest();expires=time.time()+TTL
+ aid=str(uuid.uuid4());digest=hashlib.sha256(p.read_bytes()).hexdigest();expires=time.time()+TTL
  with db() as c:c.execute('INSERT INTO approvals VALUES(?,?,?,?,?,?,?)',(aid,req.path,req.content,digest,expires,'pending',time.time()))
  audit('patch_proposed',{'approval_id':aid,'path':req.path,'expires':expires})
  return {'id':aid,'path':req.path,'old_sha256':digest,'new_sha256':hashlib.sha256(req.content.encode()).hexdigest(),'expires_at':expires,'diff':'\n'.join(difflib.unified_diff(old.splitlines(),req.content.splitlines(),fromfile=req.path,tofile=req.path+' (proposed)',lineterm=''))}
