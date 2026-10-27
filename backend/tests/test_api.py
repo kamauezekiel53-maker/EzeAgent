@@ -1,6 +1,29 @@
 from fastapi.testclient import TestClient
 import backend.main as m
 client=TestClient(m.app)
-def test_health():assert client.get('/api/v1/health').json()['status']=='ok'
+def test_health():
+ r=client.get('/api/v1/health'); assert r.status_code==200 and r.json()['status']=='ok'
 def test_no_secrets_in_provider_list(monkeypatch):
- monkeypatch.setitem(m.P['openai'],'key','top-secret');data=client.get('/api/v1/providers').text;assert 'top-secret' not in data and 'key' not in data
+ monkeypatch.setitem(m.P['openai'],'key','top-secret');data=client.get('/api/v1/providers').text;assert 'top-secret' not in data and '"key"' not in data
+def test_missing_provider_key(monkeypatch):
+ monkeypatch.setitem(m.P['openai'],'key','')
+ r=client.post('/api/v1/chat',json={'provider':'openai','messages':[{'role':'user','content':'hi'}]});assert r.status_code==400
+def test_path_traversal_rejected(tmp_path,monkeypatch):
+ monkeypatch.setattr(m,'ROOT',tmp_path)
+ r=client.post('/api/v1/workspace/read',json={'path':'../outside.txt'});assert r.status_code==400
+def test_patch_requires_approval_and_applies(tmp_path,monkeypatch):
+ monkeypatch.setattr(m,'ROOT',tmp_path);monkeypatch.setattr(m,'DB',tmp_path/'test.db')
+ target=tmp_path/'sample.txt';target.write_text('old\n')
+ r=client.post('/api/v1/workspace/proposals',json={'path':'sample.txt','content':'new\n'});assert r.status_code==200
+ aid=r.json()['id'];assert target.read_text()=='old\n'
+ done=client.post(f'/api/v1/approvals/{aid}/approve');assert done.status_code==200 and target.read_text()=='new\n'
+def test_stale_patch_rejected(tmp_path,monkeypatch):
+ monkeypatch.setattr(m,'ROOT',tmp_path);monkeypatch.setattr(m,'DB',tmp_path/'stale.db')
+ target=tmp_path/'sample.txt';target.write_text('old')
+ aid=client.post('/api/v1/workspace/proposals',json={'path':'sample.txt','content':'proposed'}).json()['id'];target.write_text('user edit')
+ r=client.post(f'/api/v1/approvals/{aid}/approve');assert r.status_code==409 and target.read_text()=='user edit'
+def test_reject_does_not_modify_file(tmp_path,monkeypatch):
+ monkeypatch.setattr(m,'ROOT',tmp_path);monkeypatch.setattr(m,'DB',tmp_path/'reject.db')
+ target=tmp_path/'sample.txt';target.write_text('original')
+ aid=client.post('/api/v1/workspace/proposals',json={'path':'sample.txt','content':'new'}).json()['id']
+ assert client.post(f'/api/v1/approvals/{aid}/reject').status_code==200;assert target.read_text()=='original'
