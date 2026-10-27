@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import os
 import backend.main as m
 client=TestClient(m.app)
 def test_health():
@@ -27,3 +28,32 @@ def test_reject_does_not_modify_file(tmp_path,monkeypatch):
  target=tmp_path/'sample.txt';target.write_text('original')
  aid=client.post('/api/v1/workspace/proposals',json={'path':'sample.txt','content':'new'}).json()['id']
  assert client.post(f'/api/v1/approvals/{aid}/reject').status_code==200;assert target.read_text()=='original'
+
+def test_open_terminal_rejects_untrusted_origin():
+ r=client.post('/api/v1/computer/terminal',headers={'Origin':'https://untrusted.example'})
+ assert r.status_code==403
+
+def test_open_terminal_is_local_dashboard_only(tmp_path,monkeypatch):
+ monkeypatch.setattr(m,'DB',tmp_path/'terminal.db')
+ class Process: pid=1234
+ monkeypatch.setattr(m.subprocess,'Popen',lambda *args,**kwargs:Process())
+ r=client.post('/api/v1/computer/terminal',headers={'Origin':'http://localhost:5173'})
+ if os.name=='nt':assert r.status_code==200 and r.json()['pid']==1234
+ else:assert r.status_code==501
+
+def test_command_runs_only_after_review_and_only_once(tmp_path,monkeypatch):
+ monkeypatch.setattr(m,'DB',tmp_path/'command.db');monkeypatch.setattr(m,'COMMANDS',{})
+ calls=[]
+ class Result: returncode=0; stdout='done'; stderr=''
+ def fake_run(args,**kwargs):calls.append((args,kwargs));return Result()
+ monkeypatch.setattr(m.subprocess,'run',fake_run)
+ headers={'Origin':'http://localhost:5173'}
+ proposal=client.post('/api/v1/computer/commands/proposals',json={'command':'echo approved'},headers=headers)
+ if os.name!='nt':assert proposal.status_code==501 and not calls;return
+ assert proposal.status_code==200 and not calls
+ command_id=proposal.json()['id']
+ done=client.post(f'/api/v1/computer/commands/{command_id}/run',headers=headers)
+ assert done.status_code==200 and done.json()['stdout']=='done' and len(calls)==1
+ assert calls[0][0]==['cmd.exe','/d','/s','/c','echo approved']
+ assert client.post(f'/api/v1/computer/commands/{command_id}/run',headers=headers).status_code==404
+

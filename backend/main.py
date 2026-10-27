@@ -1,8 +1,9 @@
 from pathlib import Path
 from typing import Any
-import hashlib, json, os, sqlite3, time, uuid
+import hashlib, ipaddress, json, os, sqlite3, subprocess, time, uuid
+from threading import Lock
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -22,11 +23,20 @@ def safe(raw):
  except ValueError:raise HTTPException(400,'Path outside configured workspace')
  if p==ROOT:raise HTTPException(400,'File path required')
  return p
+def require_local_ui(request:Request):
+ client=request.client.host if request.client else ''
+ try:local=ipaddress.ip_address(client).is_loopback
+ except ValueError:local=client=='testclient'
+ origins={x.strip() for x in os.getenv('EZEAGENT_CORS_ORIGINS','http://localhost:5173').split(',') if x.strip()}
+ if not local or request.headers.get('origin') not in origins:raise HTTPException(403,'Computer controls are available only from the local EzeAgent dashboard')
 class TestReq(BaseModel): provider:str; base_url:str|None=None; api_key:str|None=None
 class ChatReq(BaseModel): provider:str='openrouter'; model:str|None=None; api_key:str|None=None; messages:list[dict[str,str]]=Field(min_length=1,max_length=80)
 class ReadReq(BaseModel): path:str
 class Proposal(BaseModel): path:str; content:str=Field(max_length=500000)
+class CommandReq(BaseModel): command:str=Field(min_length=1,max_length=2000)
 P={'openrouter':{'name':'OpenRouter','base':'https://openrouter.ai/api/v1','key':os.getenv('OPENROUTER_API_KEY',''),'model':os.getenv('OPENROUTER_MODEL','meta-llama/llama-3.3-8b-instruct:free'),'kind':'cloud'},'openai':{'name':'OpenAI','base':'https://api.openai.com/v1','key':os.getenv('OPENAI_API_KEY',''),'model':os.getenv('OPENAI_MODEL','gpt-4o-mini'),'kind':'cloud'}}
+COMMANDS:dict[str,dict[str,Any]]={}
+COMMANDS_LOCK=Lock()
 if os.getenv('COMPATIBLE_API_BASE_URL'):P['compatible']={'name':'OpenAI-compatible endpoint','base':os.getenv('COMPATIBLE_API_BASE_URL','').rstrip('/'),'key':os.getenv('COMPATIBLE_API_KEY',''),'model':os.getenv('COMPATIBLE_MODEL','local-model'),'kind':'local' if 'localhost' in os.getenv('COMPATIBLE_API_BASE_URL','') or '127.0.0.1' in os.getenv('COMPATIBLE_API_BASE_URL','') else 'compatible'}
 @app.get('/api/v1/health')
 def health():return {'status':'ok','version':'0.1.0'}
@@ -70,6 +80,45 @@ async def chat(req:ChatReq):
  except httpx.TimeoutException:raise HTTPException(504,'AI provider timeout')
  except httpx.RequestError:raise HTTPException(502,'Cannot connect to provider')
  except (KeyError,IndexError,TypeError,ValueError):raise HTTPException(502,'Malformed provider response')
+@app.post('/api/v1/computer/terminal')
+def open_terminal(request:Request):
+ require_local_ui(request)
+ if os.name!='nt':raise HTTPException(501,'Opening a Windows Command Prompt is available only on Windows')
+ try:p=subprocess.Popen(['cmd.exe'],cwd=str(ROOT),creationflags=subprocess.CREATE_NEW_CONSOLE,close_fds=True)
+ except OSError:raise HTTPException(500,'Could not open Command Prompt')
+ audit('computer_terminal_opened',{'pid':p.pid})
+ return {'ok':True,'message':'Command Prompt opened','pid':p.pid}
+@app.post('/api/v1/computer/commands/proposals')
+def propose_command(req:CommandReq,request:Request):
+ require_local_ui(request)
+ if os.name!='nt':raise HTTPException(501,'Windows commands are available only on Windows')
+ now=time.time();command_id=str(uuid.uuid4())
+ with COMMANDS_LOCK:
+  for key in [k for k,v in COMMANDS.items() if v['expires']<now]:COMMANDS.pop(key,None)
+  COMMANDS[command_id]={'command':req.command,'expires':now+TTL}
+ audit('computer_command_proposed',{'proposal_id':command_id,'expires':now+TTL})
+ return {'id':command_id,'command':req.command,'expires_at':now+TTL}
+@app.post('/api/v1/computer/commands/{command_id}/run')
+def run_command(command_id:str,request:Request):
+ require_local_ui(request)
+ if os.name!='nt':raise HTTPException(501,'Windows commands are available only on Windows')
+ now=time.time()
+ with COMMANDS_LOCK:
+  item=COMMANDS.get(command_id)
+  if not item:raise HTTPException(404,'Command proposal not found or already used')
+  if item['expires']<now:COMMANDS.pop(command_id,None);raise HTTPException(409,'Command proposal expired; review it again')
+  COMMANDS.pop(command_id,None)
+ command=item['command']
+ try:result=subprocess.run(['cmd.exe','/d','/s','/c',command],cwd=str(ROOT),capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=30,creationflags=subprocess.CREATE_NO_WINDOW)
+ except subprocess.TimeoutExpired as exc:
+  out=exc.stdout or '';err=exc.stderr or ''
+  if isinstance(out,bytes):out=out.decode('utf-8','replace')
+  if isinstance(err,bytes):err=err.decode('utf-8','replace')
+  audit('computer_command_timeout',{'proposal_id':command_id})
+  return {'exit_code':None,'stdout':out[-12000:],'stderr':err[-12000:],'timed_out':True}
+ except OSError:raise HTTPException(500,'Could not run the reviewed command')
+ audit('computer_command_run',{'proposal_id':command_id,'exit_code':result.returncode})
+ return {'exit_code':result.returncode,'stdout':result.stdout[-12000:],'stderr':result.stderr[-12000:],'timed_out':False}
 @app.get('/api/v1/workspace/files')
 def files():
  out=[]
@@ -133,3 +182,4 @@ def reject(aid:str):
 def activity():
  with db() as c:rows=c.execute('SELECT id,kind,detail,created FROM activity ORDER BY created DESC LIMIT 100').fetchall()
  return {'events':[dict(x) for x in rows]}
+

@@ -11,7 +11,7 @@ A hybrid AI agent starter platform with a FastAPI backend, responsive React dash
 
 ## Limitations
 - Anthropic and Gemini native APIs are not implemented. Do not interpret OpenAI-compatible routing as native support for every vendor.
-- Streaming, tool/function calling, agent loops, authentication, restricted test execution, Tauri desktop wrapper, and browser/OS automation are not implemented.
+- Streaming, tool/function calling, autonomous agent loops, authentication, restricted test execution, Tauri desktop wrapper, and browser/GUI automation are not implemented. The local dashboard can open Command Prompt and run a command after you review and confirm it.
 - Approval endpoints assume a trusted local user. Do not expose the backend to untrusted networks without authentication, TLS, and additional hardening.
 - The API currently uses a configured workspace root; set `EZEAGENT_WORKSPACE` to the project you intend to inspect.
 
@@ -51,3 +51,4 @@ No arbitrary shell execution or automatic GitHub writes. Treat workspace files a
 
 ## Desktop and license
 The web app works independently. Tauri desktop packaging is planned but not implemented or verified. No license existed in the initial repository; choose and add one before distributing the project.
+
