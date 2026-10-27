@@ -7,3 +7,5 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 
 
 .voice-tools{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:14px 0}.voice-toggle{display:flex;align-items:center;gap:6px;color:#9aa5ba;font-size:10px}.voice-status{color:#a9a7ff;font-size:10px;margin-left:auto}.voice-tools button:disabled{opacity:.45;cursor:not-allowed}@media(max-width:640px){.voice-status{width:100%;margin-left:0}.voice-toggle{padding:8px 0}}
+
+.voice-choice{display:flex;align-items:center;gap:7px;color:#9aa5ba;font-size:10px}.voice-choice select{max-width:210px;background:#0b1018;border:1px solid #30394b;border-radius:6px;color:#dce4f5;padding:7px;font-size:10px}

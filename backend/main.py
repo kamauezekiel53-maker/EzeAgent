@@ -34,10 +34,12 @@ class ChatReq(BaseModel): provider:str='openrouter'; model:str|None=None; api_ke
 class ReadReq(BaseModel): path:str
 class Proposal(BaseModel): path:str; content:str=Field(max_length=500000)
 class CommandReq(BaseModel): command:str=Field(min_length=1,max_length=2000)
+class ComputerOrderReq(BaseModel): provider:str; api_key:str|None=None; model:str|None=None; order:str=Field(min_length=2,max_length=1000)
 P={'openrouter':{'name':'OpenRouter','base':'https://openrouter.ai/api/v1','key':os.getenv('OPENROUTER_API_KEY',''),'model':os.getenv('OPENROUTER_MODEL','meta-llama/llama-3.3-8b-instruct:free'),'kind':'cloud'},'openai':{'name':'OpenAI','base':'https://api.openai.com/v1','key':os.getenv('OPENAI_API_KEY',''),'model':os.getenv('OPENAI_MODEL','gpt-4o-mini'),'kind':'cloud'},'omniroute':{'name':'OmniRoute','base':os.getenv('OMNIROUTE_BASE_URL','http://127.0.0.1:20128/v1').rstrip('/'),'key':os.getenv('OMNIROUTE_API_KEY',''),'model':os.getenv('OMNIROUTE_MODEL','auto'),'kind':'local'}}
 COMMANDS:dict[str,dict[str,Any]]={}
 COMMANDS_LOCK=Lock()
-APP_LAUNCH_IDS={'word':'Microsoft.Office.WINWORD.EXE.15','excel':'Microsoft.Office.EXCEL.EXE.15'}
+APP_LAUNCH_IDS={'word':'Microsoft.Office.WINWORD.EXE.15','excel':'Microsoft.Office.EXCEL.EXE.15','notepad':'','calculator':'','explorer':''}
+APP_EXECUTABLES={'notepad':'notepad.exe','calculator':'calc.exe','explorer':'explorer.exe'}
 def find_office_executable(app_name:str)->str|None:
  executable='WINWORD.EXE' if app_name=='word' else 'EXCEL.EXE'
  found=shutil.which(executable)
@@ -111,13 +113,39 @@ def open_app(app_name:str,request:Request):
  if os.name!='nt':raise HTTPException(501,'Application launch is available only on Windows')
  app_name=app_name.lower()
  if app_name not in APP_LAUNCH_IDS:raise HTTPException(404,'Application shortcut is not configured')
- executable=find_office_executable(app_name)
+ executable=APP_EXECUTABLES.get(app_name) or find_office_executable(app_name)
  try:
   if executable:p=subprocess.Popen([executable],cwd=str(ROOT),close_fds=True)
-  else:p=subprocess.Popen(['explorer.exe',f'shell:AppsFolder\\{APP_LAUNCH_IDS[app_name]}'],cwd=str(ROOT),close_fds=True)
- except OSError:raise HTTPException(500,f'Could not open {app_name.title()}. Make sure Microsoft Office is installed.')
+  elif APP_LAUNCH_IDS[app_name]:p=subprocess.Popen(['explorer.exe',f'shell:AppsFolder\\{APP_LAUNCH_IDS[app_name]}'],cwd=str(ROOT),close_fds=True)
+  else:raise OSError('Application executable was not found')
+ except OSError:raise HTTPException(500,f'Could not open {app_name.title()}. Make sure the application is installed.')
  audit('computer_app_opened',{'app':app_name.lower(),'pid':p.pid})
  return {'ok':True,'message':f'{app_name.title()} launch requested','pid':p.pid}
+@app.post('/api/v1/computer/commands/draft')
+async def draft_computer_command(req:ComputerOrderReq,request:Request):
+ require_local_ui(request)
+ cfg=P.get(req.provider)
+ if not cfg:raise HTTPException(404,'Provider not configured')
+ key=req.api_key if req.api_key is not None else cfg['key']
+ if cfg['kind']=='cloud' and not key:raise HTTPException(400,f"{cfg['name']} API key required; enter it in Providers")
+ model=req.model or cfg['model']
+ instructions="Translate the user's requested computer task into exactly one Windows Command Prompt command. Output only the command, one line, no markdown or explanation. Prefer built-in Windows commands. Do not claim you executed it. If the task is unclear, requires credentials, or cannot be safely represented as one command, output exactly: CANNOT_PREPARE"
+ try:
+  async with httpx.AsyncClient(timeout=45) as c:r=await c.post(cfg['base']+'/chat/completions',json={'model':model,'messages':[{'role':'system','content':instructions},{'role':'user','content':req.order}]},headers={'Authorization':f'Bearer {key}'} if key else {})
+  if r.status_code in (401,403):raise HTTPException(502,'Provider authentication failed')
+  if r.status_code==429:raise HTTPException(429,'Provider rate limit reached')
+  if r.status_code==402:raise HTTPException(402,'Provider account has no available credits or billing is required')
+  if r.status_code>=400:raise HTTPException(502,f'Provider returned HTTP {r.status_code}')
+  data=r.json();command=data['choices'][0]['message']['content']
+  if not isinstance(command,str):raise HTTPException(502,'Provider did not return a command')
+  command=command.strip().strip('`')
+  if command.lower().startswith('cmd '):command=command[4:].strip()
+  if command=='CANNOT_PREPARE' or not command or len(command)>2000 or any(ch in command for ch in '\r\n\x00'):
+   raise HTTPException(422,'I could not prepare a single safe command. Try a clearer request or use Computer Control.')
+  return {'command':command,'model':model}
+ except httpx.TimeoutException:raise HTTPException(504,'AI provider timeout while preparing the computer action')
+ except httpx.RequestError:raise HTTPException(502,'Cannot connect to provider')
+ except (KeyError,IndexError,TypeError,ValueError):raise HTTPException(502,'Malformed provider response')
 @app.post('/api/v1/computer/commands/proposals')
 def propose_command(req:CommandReq,request:Request):
  require_local_ui(request)

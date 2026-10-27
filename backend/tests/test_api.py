@@ -86,3 +86,37 @@ def test_command_runs_only_after_review_and_only_once(tmp_path,monkeypatch):
  assert client.post(f'/api/v1/computer/commands/{command_id}/run',headers=headers).status_code==404
 
 
+
+
+def test_computer_order_draft_rejects_untrusted_origin():
+ r=client.post('/api/v1/computer/commands/draft',json={'provider':'omniroute','order':'show files'},headers={'Origin':'https://untrusted.example'})
+ assert r.status_code==403
+
+def test_computer_order_draft_returns_one_reviewable_command(monkeypatch):
+ captured={}
+ class Response:
+  status_code=200
+  def json(self):return {'choices':[{'message':{'content':'dir'}}]}
+ class Client:
+  def __init__(self,**kwargs):pass
+  async def __aenter__(self):return self
+  async def __aexit__(self,*args):return False
+  async def post(self,url,**kwargs):captured.update(url=url,**kwargs);return Response()
+ monkeypatch.setattr(m.httpx,'AsyncClient',Client)
+ r=client.post('/api/v1/computer/commands/draft',json={'provider':'omniroute','order':'show me files'},headers={'Origin':'http://localhost:5173'})
+ assert r.status_code==200 and r.json()['command']=='dir'
+ assert captured['url']=='http://127.0.0.1:20128/v1/chat/completions'
+ assert captured['json']['messages'][1]['content']=='show me files'
+
+def test_computer_order_draft_rejects_multiline_command(monkeypatch):
+ class Response:
+  status_code=200
+  def json(self):return {'choices':[{'message':{'content':'dir\ndel important.txt'}}]}
+ class Client:
+  def __init__(self,**kwargs):pass
+  async def __aenter__(self):return self
+  async def __aexit__(self,*args):return False
+  async def post(self,*args,**kwargs):return Response()
+ monkeypatch.setattr(m.httpx,'AsyncClient',Client)
+ r=client.post('/api/v1/computer/commands/draft',json={'provider':'omniroute','order':'show files then remove some'},headers={'Origin':'http://localhost:5173'})
+ assert r.status_code==422
