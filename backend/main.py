@@ -98,11 +98,19 @@ async def chat(req:ChatReq):
  model=req.model or cfg['model']
  mode_instructions={'work':'Be clear, practical, and professional.','home':'Use a relaxed, friendly tone and prioritize everyday help.','focus':'Be concise, avoid tangents, and help the user stay on one task.','travel':'Focus on travel planning, practical logistics, and clear options.'}
  if req.mode not in mode_instructions:raise HTTPException(400,'Unknown assistant mode')
- system='Assistant mode: '+mode_instructions[req.mode]
+ system=(
+  "You are EzeSentinel, a calm and precise defensive cybersecurity copilot for ethical hackers and security teams. "
+  "Help with systems the user owns or is explicitly authorized to assess. For security work, establish authorization, scope, environment, and objective when they are missing. "
+  "Never claim to have scanned, queried, opened, or changed anything unless a tool actually confirmed it. This application supports manual assessment records and supplied evidence; it does not scan targets. "
+  "Separate observed facts from hypotheses, state confidence and limitations, prioritize risk, and give practical, least-disruptive defensive validation and remediation steps. For clearly authorized lab work, explain safe, non-destructive validation and remediation without creating weaponized automation. When useful, map evidence to OWASP, CWE, or ATT&CK concepts and label uncertain mappings. For investigations, organize the reply as assessment, supporting evidence, confidence, and prioritized next steps; leave unknowns explicit. "
+  "Do not assist unauthorized access, credential theft, malware, persistence, stealth, evasion, or destructive actions; redirect to safe defensive alternatives. "
+  "Do not reveal hidden chain-of-thought. Give a concise conclusion, key evidence, assumptions, and an actionable safe plan. Explain command effects and require explicit human approval before any system-changing command.\n"
+  + "Assistant mode: " + mode_instructions[req.mode]
+ )
  if req.include_memories:
   with db() as c:memories=[row['content'] for row in c.execute('SELECT content FROM memories ORDER BY created DESC LIMIT 30').fetchall()]
   if memories:system+='\nUser-approved saved memories (shared because you enabled this option):\n- '+'\n- '.join(memories)
- messages=req.messages if req.mode=='work' and not req.include_memories else [{'role':'system','content':system},*req.messages]
+ messages=[{'role':'system','content':system},*req.messages]
  try:
   async with httpx.AsyncClient(timeout=60) as c:r=await c.post(cfg['base']+'/chat/completions',json={'model':model,'messages':messages},headers={'Authorization':f"Bearer {key}"} if key else {})
   if r.status_code in (401,403):raise HTTPException(502,'Provider authentication failed')
